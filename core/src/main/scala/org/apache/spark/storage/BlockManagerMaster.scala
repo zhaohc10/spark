@@ -17,6 +17,8 @@
 
 package org.apache.spark.storage
 
+import java.io.IOException
+
 import scala.collection.Iterable
 import scala.collection.generic.CanBuildFrom
 import scala.concurrent.Future
@@ -124,9 +126,19 @@ class BlockManagerMaster(
   /** Remove all blocks belonging to the given RDD. */
   def removeRdd(rddId: Int, blocking: Boolean) {
     val future = driverEndpoint.askSync[Future[Seq[Int]]](RemoveRdd(rddId))
-    future.failed.foreach(e =>
-      logWarning(s"Failed to remove RDD $rddId - ${e.getMessage}", e)
-    )(ThreadUtils.sameThread)
+
+//    future.failed.foreach(e =>
+//      logWarning(s"Failed to remove RDD $rddId - ${e.getMessage}", e)
+//    )
+    future.onFailure {
+      case cce: IOException =>
+        // case cce: ClosedChannelException =>
+        logWarning(s"Failed to remove RDD $rddId - ${cce.getMessage}", cce)
+        logWarning("Ok, previously failed to remove a dead executor from driver, remove it...")
+        driverEndpoint.ask(ExpireZombieBlockManager)
+      case e: Exception =>
+        logWarning(s"Failed to remove RDD $rddId - ${e.getMessage}", e)
+    }(ThreadUtils.sameThread)
     if (blocking) {
       timeout.awaitResult(future)
     }

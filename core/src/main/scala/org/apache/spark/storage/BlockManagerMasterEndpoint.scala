@@ -121,6 +121,10 @@ class BlockManagerMasterEndpoint(
       removeBlockFromWorkers(blockId)
       context.reply(true)
 
+    case ExpireZombieBlockManager =>
+      expireZombieBlockManager()
+
+
     case RemoveExecutor(execId) =>
       removeExecutor(execId)
       context.reply(true)
@@ -244,12 +248,14 @@ class BlockManagerMasterEndpoint(
     }
 
     listenerBus.post(SparkListenerBlockManagerRemoved(System.currentTimeMillis(), blockManagerId))
-    logInfo(s"Removing block manager $blockManagerId")
+//    logInfo(s"Removing block manager $blockManagerId")
+    logWarning(s"Removing block manager $blockManagerId")
 
   }
 
   private def removeExecutor(execId: String) {
-    logInfo("Trying to remove executor " + execId + " from BlockManagerMaster.")
+//    logInfo("Trying to remove executor " + execId + " from BlockManagerMaster.")
+    logWarning("Trying to remove executor " + execId + " from BlockManagerMaster.")
     blockManagerIdByExecutor.get(execId).foreach(removeBlockManager)
   }
 
@@ -282,6 +288,31 @@ class BlockManagerMasterEndpoint(
       }
     }
   }
+
+  /**
+    * In the case of slave nodes with intermittent network access (off/on multiple times),
+    * the BlockManagerMaster is some times found in a
+    * bad state (with zombie executor BlockManagerInfo), most likely due to some race condition.
+    * These zombie BlockManagerInfos will lead to exception (ClosedChannelException) when
+    * BlockManagerMaster is trying to remove Rdd/Shuffle/Broadcast, such as:
+    *   java.io.IOException: Failed to send RPC 5807895775549752733 to /172.22.96.110:38256:
+    *   java.nio.channels.ClosedChannelException
+    * The function checks the lastSeenMs of BlockManagerInfos and will expire them
+    * if they're zombie.
+    */
+  private def expireZombieBlockManager() {
+    val timeout = conf.getLong("spark.rpc.zombie.blockmanager.timeout", 600)
+    val deprecated = blockManagerInfo.filter(
+      item => (System.currentTimeMillis() - item._2.lastSeenMs) >
+        timeout * 1000).keys
+    deprecated.foreach(
+      item => {
+        logWarning(s"Expire zombie blockManager after $timeout s.")
+        removeBlockManager(item)
+      }
+    )
+  }
+
 
   // Return a map from the block manager id to max memory and remaining memory.
   private def memoryStatus: Map[BlockManagerId, (Long, Long)] = {
