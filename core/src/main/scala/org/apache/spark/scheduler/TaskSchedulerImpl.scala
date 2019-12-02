@@ -32,6 +32,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config
 import org.apache.spark.rpc.RpcEndpoint
 import org.apache.spark.scheduler.SchedulingMode.SchedulingMode
+import org.apache.spark.scheduler.TaskAssignMode.TaskAssignMode
 import org.apache.spark.scheduler.TaskLocality.TaskLocality
 import org.apache.spark.storage.BlockManagerId
 import org.apache.spark.util.{AccumulatorV2, SystemClock, ThreadUtils, Utils}
@@ -131,6 +132,9 @@ private[spark] class TaskSchedulerImpl(
   private var schedulableBuilder: SchedulableBuilder = null
   // default scheduler is FIFO
   private val schedulingModeConf = conf.get(SCHEDULER_MODE_PROPERTY, SchedulingMode.FIFO.toString)
+  // default assign mode is RANDOM
+  private val taskAssignModeConf = conf.get("spark.task.assign.mode", "RANDOM")
+
   val schedulingMode: SchedulingMode =
     try {
       SchedulingMode.withName(schedulingModeConf.toUpperCase(Locale.ROOT))
@@ -138,6 +142,14 @@ private[spark] class TaskSchedulerImpl(
       case e: java.util.NoSuchElementException =>
         throw new SparkException(s"Unrecognized $SCHEDULER_MODE_PROPERTY: $schedulingModeConf")
     }
+
+  val taskAssignMode: TaskAssignMode = try {
+    TaskAssignMode.withName(taskAssignModeConf.toUpperCase)
+  } catch {
+    case e: java.util.NoSuchElementException =>
+      throw new SparkException(s"Unrecognized spark.task.assign.mode: $taskAssignModeConf")
+  }
+
 
   val rootPool: Pool = new Pool("", schedulingMode, 0, 0)
 
@@ -387,7 +399,21 @@ private[spark] class TaskSchedulerImpl(
       }
     }.getOrElse(offers)
 
-    val shuffledOffers = shuffleOffers(filteredOffers)
+    // val shuffledOffers = Random.shuffle(filteredOffers)
+    // the reason for this change is to
+    // keep the partition of kafka to be "sticky" to a particular node
+    // , so that previous state could be stored in the node and no shuffle
+    // is required when updating the state of session summary
+    val shuffledOffers = taskAssignMode match {
+      case TaskAssignMode.STICKY =>
+        logDebug("STICKY task assign mode, will not shuffle.")
+        offers
+      case _ =>
+        logDebug("non STICKY task assign mode, will shuffle.")
+        Random.shuffle(offers)
+    }
+
+
     // Build a list of tasks to assign to each worker.
     val tasks = shuffledOffers.map(o => new ArrayBuffer[TaskDescription](o.cores / CPUS_PER_TASK))
     val availableCpus = shuffledOffers.map(o => o.cores).toArray
